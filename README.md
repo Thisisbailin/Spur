@@ -103,3 +103,59 @@ Unable to open mach-O at path: .../RenderBox.framework/.../default.metallib Erro
 ## 许可证
 
 [待定] 
+
+# Spur翻译工具 - 架构说明
+
+## MVVM架构实现
+
+本项目采用MVVM (Model-View-ViewModel) 架构设计模式，以提高代码的可维护性、可测试性和可扩展性。
+
+### 组件结构
+
+1. **Model层**
+   - `TranslationManager`: 管理不同翻译服务的核心类
+   - `TranslationService`：翻译服务的协议抽象
+   - `AppleTranslationService`/`GeminiTranslationService`：具体翻译服务实现
+
+2. **ViewModel层**
+   - `TranslationViewModel`：管理翻译状态和业务逻辑，充当View和Model之间的桥梁
+
+3. **View层**
+   - `ContentView`：主容器视图，仅负责视图组合和基本布局
+   - `InputAreaView`：负责输入区域UI和交互
+   - `OutputAreaView`：负责显示翻译结果和状态
+
+### 数据流
+
+1. 用户在`InputAreaView`中输入文本并与UI交互
+2. 这些交互通过绑定更新`TranslationViewModel`中的状态
+3. `TranslationViewModel`处理业务逻辑并调用`TranslationManager`执行翻译
+4. 翻译结果通过`TranslationViewModel`更新，反映在`OutputAreaView`中
+
+## 架构优势
+
+### 1. 关注点分离
+- 视图组件只负责UI渲染和用户交互
+- 业务逻辑集中在ViewModel中
+- 翻译功能封装在专用服务中
+
+### 2. 可维护性
+- 代码模块化，各部分职责明确
+- 降低了组件间的耦合度
+- 更容易理解和修改单个组件
+
+### 3. 可测试性
+- ViewModel可以独立测试，无需依赖UI
+- 可以为Model层编写单元测试
+
+### 4. 可扩展性
+- 轻松添加新的翻译服务而不影响UI
+- 可以轻松扩展UI功能而不改变底层逻辑
+- 为添加历史记录、设置等功能提供了清晰的路径
+
+## 未来扩展考虑
+
+- 添加历史记录功能：在ViewModel中添加历史管理
+- 实现用户设置：创建专用的SettingsViewModel
+- 支持更多翻译引擎：只需实现新的TranslationService
+- 离线模式：在Model层添加缓存机制 

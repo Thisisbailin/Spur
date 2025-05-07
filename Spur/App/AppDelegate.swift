@@ -8,6 +8,12 @@
 import SwiftUI
 import AppKit
 
+// 用于菜单操作的通知名称
+extension Notification.Name {
+    static let showHistory = Notification.Name("showHistory")
+    static let showSettings = Notification.Name("showSettings")
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
     var spurPanelWindowController: NSWindowController? // 用于管理我们的 Spur 面板
@@ -41,17 +47,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         appMenu?.addItem(NSMenuItem.separator())
         
-        // 占位菜单项
-        let frameworkItem = NSMenuItem(title: "翻译框架 (占位)", action: nil, keyEquivalent: "")
-        let themeItem = NSMenuItem(title: "偏好主题 (占位)", action: nil, keyEquivalent: "")
-        let historyItem = NSMenuItem(title: "历史记录 (占位)", action: nil, keyEquivalent: "")
-        let settingsItem = NSMenuItem(title: "设置 (占位)", action: nil, keyEquivalent: "")
+        // 翻译框架子菜单
+        let frameworkSubmenu = NSMenu()
+        frameworkSubmenu.addItem(withTitle: "Apple Translation", action: #selector(selectAppleTranslation), keyEquivalent: "1").target = self
+        frameworkSubmenu.addItem(withTitle: "Gemini API", action: #selector(selectGeminiTranslation), keyEquivalent: "2").target = self
         
-        [frameworkItem, themeItem, historyItem, settingsItem].forEach { $0.isEnabled = false } // 暂时禁用
+        let frameworkItem = NSMenuItem(title: "翻译框架", action: nil, keyEquivalent: "")
+        frameworkItem.submenu = frameworkSubmenu
         appMenu?.addItem(frameworkItem)
-        appMenu?.addItem(themeItem)
-        appMenu?.addItem(historyItem)
-        appMenu?.addItem(settingsItem)
+        
+        // 历史记录菜单项
+        appMenu?.addItem(
+            withTitle: "历史记录",
+            action: #selector(showHistory),
+            keyEquivalent: "h"
+        ).target = self
+        
+        // 设置菜单项
+        appMenu?.addItem(
+            withTitle: "设置",
+            action: #selector(showSettings),
+            keyEquivalent: ","
+        ).target = self
         
         appMenu?.addItem(NSMenuItem.separator())
         
@@ -60,6 +77,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(NSApplication.terminate(_:)), // 使用标准的 terminate
             keyEquivalent: "q" //  可以给一个快捷键 Command+Q (系统会自动处理)
         ).target = NSApp // target 是 NSApp
+    }
+    
+    // 翻译框架选择
+    @objc func selectAppleTranslation() {
+        NotificationCenter.default.post(name: NSNotification.Name("selectTranslationEngine"), object: "Apple Translation")
+    }
+    
+    @objc func selectGeminiTranslation() {
+        NotificationCenter.default.post(name: NSNotification.Name("selectTranslationEngine"), object: "Gemini API")
+    }
+    
+    // 历史记录和设置菜单项动作
+    @objc func showHistory() {
+        ensureSpurPanelWindowExistsAndIsReady()
+        showAndFocusPanelWindow()
+        NotificationCenter.default.post(name: .showHistory, object: nil)
+    }
+    
+    @objc func showSettings() {
+        ensureSpurPanelWindowExistsAndIsReady()
+        showAndFocusPanelWindow()
+        NotificationCenter.default.post(name: .showSettings, object: nil)
     }
 
     @objc func showSpurPanelFromMenu() {
