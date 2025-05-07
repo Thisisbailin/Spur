@@ -337,16 +337,23 @@ struct ImagePickerView: View {
                     .controlSize(.small)
                 }
             }
-            .onDrop(of: ["public.file-url"], isTargeted: $isDragging) { providers -> Bool
-                providers.first?.loadDataRepresentation(forTypeIdentifier: "public.file-url", completionHandler: { (data, error) in
-                    if let data = data, let path = NSString(data: data, encoding: 4),
-                       let url = URL(string: path as String), url.isFileURL {
+            .onDrop(of: ["public.file-url"], isTargeted: $isDragging) { providers in
+                guard let provider = providers.first else {
+                    return false
+                }
+                
+                provider.loadDataRepresentation(forTypeIdentifier: "public.file-url") { data, error in
+                    if let data = data, 
+                       let path = NSString(data: data, encoding: 4),
+                       let url = URL(string: path as String), 
+                       url.isFileURL {
                         let image = NSImage(contentsOf: url)
                         DispatchQueue.main.async {
                             onSelect(image)
                         }
                     }
-                })
+                }
+                
                 return true
             }
             
