@@ -27,28 +27,42 @@ class AppleTranslationService: TranslationServiceProtocol {
             
             let configuration = TranslationSession.Configuration(source: sourceLanguage, target: targetLanguage)
             
-            // 使用一个标记来确保continuation只被调用一次
+            // 使用SwiftUI的translationTask修饰符获取会话并执行翻译
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
                 var hasCompleted = false
                 
-                // 创建任务进行翻译
+                // 创建任务
                 let task = Task {
                     do {
-                        let session = try TranslationSession(configuration: configuration)
+                        // 使用SwiftUI视图和translationTask修饰符获取会话
+                        let view = Text("")
+                            .translationTask(configuration) { session in
+                                Task {
+                                    do {
+                                        try await session.prepareTranslation()
+                                        let response = try await session.translate(text)
+                                        
+                                        // 确保只有在尚未完成时才恢复continuation
+                                        if !hasCompleted {
+                                            hasCompleted = true
+                                            continuation.resume(returning: response.targetText)
+                                        }
+                                    } catch {
+                                        // 确保只有在尚未完成时才恢复continuation
+                                        if !hasCompleted {
+                                            hasCompleted = true
+                                            continuation.resume(throwing: TranslationError.translationFailed("Apple Translation失败: \(error.localizedDescription)"))
+                                        }
+                                    }
+                                }
+                            }
                         
-                        try await session.prepareTranslation()
-                        let response = try await session.translate(text)
-                        
-                        // 确保只有在尚未完成时才恢复continuation
-                        if !hasCompleted {
-                            hasCompleted = true
-                            continuation.resume(returning: response.targetText)
-                        }
+                        // 确保视图被"渲染"（在macOS下）
+                        _ = NSHostingView(rootView: view.frame(width: 0, height: 0).opacity(0))
                     } catch {
-                        // 确保只有在尚未完成时才恢复continuation
                         if !hasCompleted {
                             hasCompleted = true
-                            continuation.resume(throwing: TranslationError.translationFailed("Apple Translation失败: \(error.localizedDescription)"))
+                            continuation.resume(throwing: TranslationError.translationFailed("无法创建翻译会话: \(error.localizedDescription)"))
                         }
                     }
                 }
