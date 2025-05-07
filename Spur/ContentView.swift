@@ -7,15 +7,19 @@
 
 import SwiftUI
 import Combine // For listening to Enter key
+import Translation
 
 struct ContentView: View {
     @State private var inputText: String = ""
     @State private var translatedText: String = ""
     @State private var isResultVisible: Bool = false
     @State private var isLoading: Bool = false
+    @State private var errorMessage: String? = nil
 
-    @State private var selectedTranslationEngine: String = "Translation"
+    @State private var selectedTranslationEngine: String = "Apple Translation"
     @State private var selectedTheme: String = "日常"
+    @State private var sourceLanguage: String = "auto"
+    @State private var targetLanguage: String = "zh_CN"
     @State private var textEditorHeight: CGFloat = 40
     private let minTextEditorHeight: CGFloat = 40
     private let maxTextEditorHeight: CGFloat = 150
@@ -25,25 +29,129 @@ struct ContentView: View {
 
     // Subject to publish Enter key presses
     private let enterKeyPressSubject = PassthroughSubject<Void, Never>()
-
+    
+    // 翻译管理器实例
+    private let translationManager = TranslationManager.shared
+    
+    // 翻译引擎
+    private var engines: [TranslationEngine] {
+        TranslationEngineData.all
+    }
+    
+    // 翻译主题
+    private var themes: [TranslationTheme] {
+        TranslationThemeData.all
+    }
+    
+    // 常用语言
+    private var languages: [Language] {
+        LanguageData.common
+    }
+    
+    // Apple Translation选择的目标语言
+    @State private var appleTargetLanguage: String = "zh_CN"
+    // Gemini翻译偏好主题
+    @State private var geminiTranslationTheme: String = "日常"
+    
+    // 跟踪上次翻译的文本
+    @State private var lastTranslatedText: String = ""
+    
+    // 当前是否使用Apple翻译
+    private var isUsingAppleTranslation: Bool {
+        selectedTranslationEngine == "Apple Translation"
+    }
+    
+    // 初始化方法
+    init() {
+        // 注册Gemini API翻译服务
+        let geminiService = GeminiTranslationService()
+        translationManager.registerService(geminiService)
+    }
 
     private func performTranslationAction() {
+        Task {
+            await performTranslation()
+        }
+    }
+    
+    private func performTranslation() async {
         let trimmedInput = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedInput.isEmpty {
             withAnimation { isResultVisible = false }
             return
         }
-        isLoading = true
-        // Simulate translation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            translatedText = "翻译结果: \(trimmedInput)\n多行内容测试，确保显示正常。"
-            isLoading = false
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                isResultVisible = true
+        
+        // 防止重复翻译相同的文本
+        if trimmedInput == lastTranslatedText && isResultVisible {
+            return
+        }
+        
+        lastTranslatedText = trimmedInput
+        
+        // 设置加载状态
+        DispatchQueue.main.async {
+            self.isLoading = true
+            self.errorMessage = nil
+            withAnimation {
+                self.isResultVisible = true
             }
-            // 清空输入框并重置高度 (如果需要)
-            // inputText = ""
-            // textEditorHeight = minTextEditorHeight
+        }
+        
+        do {
+            // 根据UI选择的翻译引擎切换服务
+            translationManager.switchService(to: selectedTranslationEngine)
+            
+            // 如果使用Gemini，设置翻译主题
+            if !isUsingAppleTranslation {
+                translationManager.setTranslationTheme(geminiTranslationTheme)
+            }
+            
+            // 根据选择的翻译引擎，使用不同的目标语言或使用主题修改提示词
+            var fromLanguage = sourceLanguage
+            var toLanguage = isUsingAppleTranslation ? appleTargetLanguage : targetLanguage
+            
+            // 如果使用Gemini且有选择主题，将主题信息添加到文本中
+            var textToTranslate = trimmedInput
+            if !isUsingAppleTranslation && geminiTranslationTheme != "日常" {
+                let themeInstruction: String
+                switch geminiTranslationTheme {
+                case "学术":
+                    themeInstruction = "以学术和专业的语言风格"
+                case "词源":
+                    themeInstruction = "解释词语来源并提供相关上下文，"
+                default:
+                    themeInstruction = ""
+                }
+                textToTranslate = "将以下文本\(themeInstruction)翻译成中文：\n\n\(trimmedInput)"
+                // 对Gemini使用固定的英文到中文翻译，使用主题控制风格
+                fromLanguage = "en"
+                toLanguage = "zh_CN"
+            }
+            
+            // 执行翻译
+            let result = try await translationManager.translate(
+                text: textToTranslate,
+                from: fromLanguage,
+                to: toLanguage
+            )
+            
+            // 更新UI
+            DispatchQueue.main.async {
+                self.translatedText = result.translatedText
+                self.isLoading = false
+            }
+        } catch {
+            // 处理错误
+            DispatchQueue.main.async {
+                self.isLoading = false
+                if let translationError = error as? TranslationError {
+                    self.errorMessage = translationError.localizedDescription
+                    self.translatedText = "翻译错误: \(translationError.localizedDescription)"
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.translatedText = "翻译错误: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -54,7 +162,27 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if isLoading {
-                            ProgressView().padding()
+                            VStack(spacing: 12) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .padding(.vertical, 4)
+                                Text("正在翻译...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                        } else if let errorMessage = errorMessage {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("翻译失败")
+                                    .font(.headline)
+                                    .foregroundColor(.red)
+                                Text(errorMessage)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             Text(translatedText)
                                 .font(.system(size: 14))
@@ -70,6 +198,118 @@ struct ContentView: View {
 
             // 2. Input Area
             VStack(spacing: 0) {
+                // 语言选择栏 - 根据翻译引擎显示不同选项
+                HStack(spacing: 8) {
+                    if isUsingAppleTranslation {
+                        // Apple Translation模式：源语言+目标语言选择器
+                        // 源语言选择
+                        Menu {
+                            ForEach(languages) { language in
+                                Button(language.name) {
+                                    sourceLanguage = language.code
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Text(LanguageData.language(for: sourceLanguage).name)
+                                    .font(.caption)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+                        
+                        // 交换语言按钮
+                        Button(action: {
+                            // 如果源语言是自动检测，则不交换
+                            if sourceLanguage != "auto" {
+                                let temp = sourceLanguage
+                                sourceLanguage = appleTargetLanguage
+                                appleTargetLanguage = temp
+                            }
+                        }) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.caption)
+                                .padding(6)
+                                .foregroundColor(.accentColor)
+                        }
+                        .disabled(sourceLanguage == "auto")
+                        
+                        // 目标语言选择 - 只显示Apple支持的语言
+                        Menu {
+                            ForEach(languages.filter { $0.code != "auto" }) { language in
+                                Button(language.name) {
+                                    appleTargetLanguage = language.code
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Text(LanguageData.language(for: appleTargetLanguage).name)
+                                    .font(.caption)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+                    } else {
+                        // Gemini API模式：源语言+翻译主题选择器
+                        // 源语言选择
+                        Menu {
+                            ForEach(languages) { language in
+                                Button(language.name) {
+                                    sourceLanguage = language.code
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Text(LanguageData.language(for: sourceLanguage).name)
+                                    .font(.caption)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+                        
+                        Spacer()
+                        
+                        // 翻译主题选择
+                        Menu {
+                            ForEach(TranslationThemeData.all) { theme in
+                                Button(theme.name) {
+                                    geminiTranslationTheme = theme.id
+                                    // 设置翻译管理器的主题
+                                    translationManager.setTranslationTheme(theme.id)
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "wand.and.stars")
+                                    .font(.caption)
+                                Text(TranslationThemeData.theme(for: geminiTranslationTheme).name)
+                                    .font(.caption)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                
                 // 2a. Text Input Area
                 ZStack(alignment: .topTrailing) { // Use ZStack for potential clear button
                     TextEditor(text: $inputText)
@@ -81,10 +321,15 @@ struct ContentView: View {
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
                         .onChange(of: inputText) { newValue in
-                            // Remove trailing newline if it was added by Enter press that we handled
+                            // 自动检测Enter键
                             if newValue.hasSuffix("\n") && newValue.count > previousInputText.count {
-                                // This logic is tricky; we want to send on Enter, not just add newline
-                                // The PassthroughSubject approach is more robust for Enter detection.
+                                let trimmedInput = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !trimmedInput.isEmpty && previousInputText.trimmingCharacters(in: .whitespacesAndNewlines) != trimmedInput {
+                                    // 移除末尾换行符
+                                    inputText = trimmedInput
+                                    // 执行翻译
+                                    performTranslationAction()
+                                }
                             }
                             previousInputText = newValue // Keep track of previous text
 
@@ -100,61 +345,42 @@ struct ContentView: View {
                             }
                             self.textEditorHeight = min(max(estimatedHeight, minTextEditorHeight), maxTextEditorHeight)
                         }
-                        // Custom modifier to handle Enter key press
                         .onReceive(NotificationCenter.default.publisher(for: NSTextView.didChangeNotification)) { obj in
                             guard let textView = obj.object as? NSTextView, textView.string == inputText else { return }
-                            // This notification fires for many changes. For Enter specifically,
-                            // we'd need to inspect the actual key event, which is harder in pure SwiftUI.
-                            // The PassthroughSubject method with a custom NSViewRepresentable is better.
-                            // For now, we'll rely on onCommand for Shift+Enter for newline.
                         }
                         .onCommand(#selector(NSResponder.insertNewline(_:))) {
-                            // Default Enter behavior: usually adds a newline. We want to send.
-                            // If we want Enter to send, and Shift+Enter for newline, this needs more work.
-                            // For simplicity now, Enter will still add newline, send button is primary.
-                            // To make Enter send:
-                            // 1. Prevent default newline.
-                            // 2. Call performTranslationAction().
-                            // This often requires an NSViewRepresentable wrapper for TextEditor.
-                            // Or a "hack" by checking if the last char is a newline after a change.
                             print("Enter pressed (default newline)")
                         }
-
-
-                    // Removed the 'x' clear button as per request
                 }
-                .padding(.top, 8)
+                .padding(.top, 4)
                 .padding(.horizontal, 8)
 
                 // 2b. Controls Area
                 HStack(spacing: 0) { // Reduce spacing to 0 and use padding on items
                     Group { // Group for easier padding application
+                        // 翻译引擎选择
                         Menu {
-                            Button("Apple Translation") { selectedTranslationEngine = "Translation" }
-                            Button("Gemini API") { selectedTranslationEngine = "Gemini" }
+                            ForEach(engines) { engine in
+                                Button(engine.name) { 
+                                    selectedTranslationEngine = engine.id
+                                    print("Switched to \(engine.name)")
+                                }
+                            }
                         } label: {
-                            Image(systemName: "globe")
-                                .font(.system(size: 17)) // Slightly smaller icon
-                                .frame(width: 30, height: 30) // Ensure tap area
-                                .contentShape(Rectangle())
+                            HStack(spacing: 4) {
+                                Image(systemName: selectedTranslationEngine == "Apple Translation" ? "apple.logo" : "sparkle")
+                                    .font(.system(size: 15))
+                                Text(TranslationEngineData.engine(for: selectedTranslationEngine).name)
+                                    .font(.system(size: 12))
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 120, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                         .menuStyle(.borderlessButton)
                         .padding(.horizontal, 4)
 
-
-                        Menu {
-                            Button("日常") { selectedTheme = "日常" }
-                            Button("学术") { selectedTheme = "学术" }
-                            Button("词源") { selectedTheme = "词源" }
-                        } label: {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 17))
-                                .frame(width: 30, height: 30)
-                                .contentShape(Rectangle())
-                        }
-                        .menuStyle(.borderlessButton)
-                        .padding(.horizontal, 4)
-
+                        // 历史和设置按钮
                         Button { print("History Tapped") } label: {
                             Image(systemName: "clock.arrow.circlepath")
                                 .font(.system(size: 17))
@@ -186,11 +412,11 @@ struct ContentView: View {
                     .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .padding(.horizontal, 6)
                 }
-                .padding(EdgeInsets(top: 6, leading: 10, bottom: 8, trailing: 10)) // Adjusted padding
+                .padding(EdgeInsets(top: 6, leading: 10, bottom: 8, trailing: 10)) 
             }
-            .background(Color.primary.opacity(0.04)) // Subtle background for input area
+            .background(Color.primary.opacity(0.04)) 
         }
-        .background(.regularMaterial) // Main panel material
+        .background(.regularMaterial)
         .cornerRadius(18) // Slightly larger corner radius
         // Add a very subtle shadow to the panel itself
         .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
@@ -208,6 +434,16 @@ struct ContentView: View {
         // Store previous inputText to help with Enter key logic (if needed)
         .onStateChange(of: inputText) { newValue, oldValue in
              self.previousInputText = oldValue
+        }
+        .onChange(of: selectedTranslationEngine) { _ in
+            // 根据引擎变化，重置相关设置
+            if isUsingAppleTranslation {
+                // 默认Apple翻译器目标语言为中文
+                targetLanguage = "zh_CN" 
+            } else {
+                // 默认Gemini主题为"日常"
+                geminiTranslationTheme = "日常"
+            }
         }
     }
     // Helper to store previous inputText value
