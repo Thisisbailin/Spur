@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import AppKit // 用于文件选择器和图像处理
 
 struct InputAreaView: View {
     // MARK: - Properties
@@ -25,6 +26,10 @@ struct InputAreaView: View {
 
     // FocusState for TextEditor, passed from ContentView
     @FocusState.Binding var isTextEditorFocused: Bool
+    
+    // OCR相关状态
+    @State private var isImagePickerPresented: Bool = false
+    @State private var selectedImage: NSImage? = nil
     
     // Computed property to determine if Apple Translation is used
     var isUsingAppleTranslation: Bool {
@@ -87,6 +92,17 @@ struct InputAreaView: View {
                 .padding(EdgeInsets(top: 5, leading: 8, bottom: 6, trailing: 8)) // Reduced padding
         }
         .background(Color.primary.opacity(0.04))
+        .sheet(isPresented: $isImagePickerPresented) {
+            // 处理图像选择
+            ImagePickerView { selectedImage in
+                if let image = selectedImage {
+                    // 执行OCR翻译
+                    self.selectedImage = image
+                    viewModel.performOCRTranslation(with: image)
+                }
+                isImagePickerPresented = false
+            }
+        }
     }
 
     // MARK: - Subviews
@@ -174,7 +190,7 @@ struct InputAreaView: View {
     // Text Input Editor
     @ViewBuilder
     private func textInputEditor() -> some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .bottomTrailing) {
             TextEditor(text: $inputText)
                 .focused($isTextEditorFocused) // Use the binding
                 .font(.system(size: 14)) // Slightly smaller font
@@ -210,6 +226,22 @@ struct InputAreaView: View {
                     // This can be used if you want specific action on Enter without Shift
                     // For now, the onChange handles translation on newline.
                 }
+            
+            // OCR图像选择按钮
+            if !isUsingAppleTranslation {
+                Button(action: {
+                    isImagePickerPresented = true
+                }) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(.accentColor)
+                        .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+                .buttonHoverEffect()
+                .help("添加图片进行OCR识别翻译")
+                .padding(8)
+            }
         }
     }
 
@@ -238,8 +270,16 @@ struct InputAreaView: View {
             .menuStyle(.borderlessButton)
             .padding(.horizontal, 3) // Reduced padding
             .help("选择翻译引擎")
-
+            
             Spacer()
+            
+            // 如果有选中的图像，显示指示器
+            if viewModel.hasSelectedImage {
+                Text("图像OCR中...")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.trailing, 5)
+            }
 
             // Translate Button
             Button(action: performTranslationAction) {
@@ -252,6 +292,102 @@ struct InputAreaView: View {
             .padding(.horizontal, 5) // Reduced padding
             .buttonHoverEffect() // 添加悬停效果
             .help("翻译")
+        }
+    }
+}
+
+// MARK: - 图像选择器视图
+struct ImagePickerView: View {
+    var onSelect: (NSImage?) -> Void
+    
+    @State private var isHovering = false
+    @State private var isDragging = false
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("选择图像进行OCR识别")
+                .font(.headline)
+            
+            ZStack {
+                Rectangle()
+                    .fill(isDragging ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.05))
+                    .frame(width: 300, height: 200)
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isDragging ? Color.accentColor : Color.primary.opacity(0.2), lineWidth: 2)
+                    )
+                
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.text.image")
+                        .font(.system(size: 40))
+                        .foregroundColor(isDragging ? .accentColor : .primary.opacity(0.7))
+                    
+                    Text("拖放图像到此处")
+                        .font(.body)
+                    
+                    Text("或")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Button("选择图像文件") {
+                        openFileDialog()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+            .onDrop(of: ["public.file-url"], isTargeted: $isDragging) { providers -> Bool
+                providers.first?.loadDataRepresentation(forTypeIdentifier: "public.file-url", completionHandler: { (data, error) in
+                    if let data = data, let path = NSString(data: data, encoding: 4),
+                       let url = URL(string: path as String), url.isFileURL {
+                        let image = NSImage(contentsOf: url)
+                        DispatchQueue.main.async {
+                            onSelect(image)
+                        }
+                    }
+                })
+                return true
+            }
+            
+            HStack {
+                Button("取消") {
+                    onSelect(nil)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                
+                Spacer().frame(width: 20)
+                
+                Button("确认") {
+                    // 直接关闭视图，图像已通过文件选择器处理
+                    onSelect(nil)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(true) // 不需要确认按钮的功能，由文件选择器直接处理
+            }
+            .padding(.top, 10)
+        }
+        .padding(20)
+        .frame(width: 350, height: 350)
+    }
+    
+    // 打开文件选择器
+    private func openFileDialog() {
+        let openPanel = NSOpenPanel()
+        openPanel.allowsMultipleSelection = false
+        openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
+        openPanel.allowedContentTypes = [.image]
+        
+        openPanel.begin { response in
+            if response == .OK, let url = openPanel.url {
+                let image = NSImage(contentsOf: url)
+                DispatchQueue.main.async {
+                    onSelect(image)
+                }
+            }
         }
     }
 }

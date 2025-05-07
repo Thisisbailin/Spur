@@ -19,6 +19,9 @@ class TranslationViewModel: ObservableObject {
     @Published var appleTargetLanguage: String = "zh_CN"
     @Published var geminiTranslationTheme: String = "日常"
     
+    // 添加处理OCR图像的相关属性和方法
+    @Published var hasSelectedImage: Bool = false
+    
     // 跟踪上次翻译的文本
     private var lastTranslatedText: String = ""
     
@@ -271,5 +274,63 @@ class TranslationViewModel: ObservableObject {
         
         // 限制高度范围
         self.textEditorHeight = min(max(estimatedHeight, minTextEditorHeight), maxTextEditorHeight)
+    }
+    
+    // 执行OCR图像翻译
+    func performOCRTranslation(with image: NSImage) {
+        Task {
+            await MainActor.run {
+                self.isLoading = true
+                self.errorMessage = nil
+                withAnimation {
+                    self.isResultVisible = true
+                }
+            }
+            
+            do {
+                // 切换到Gemini服务
+                self.selectedTranslationEngine = "Gemini API"
+                let _ = translationManager.switchService(to: "Gemini API")
+                
+                // 获取Gemini服务实例
+                if let geminiService = translationManager.getCurrentService() as? GeminiTranslationService {
+                    // 设置图像
+                    geminiService.setImage(image)
+                    self.hasSelectedImage = true
+                    
+                    // 执行翻译
+                    let result = try await translationManager.translate(
+                        text: "OCR Image", // 占位符文本
+                        from: "auto",
+                        to: "zh_CN"
+                    )
+                    
+                    // 更新UI
+                    await MainActor.run {
+                        self.translatedText = result.translatedText
+                        self.isLoading = false
+                        self.hasSelectedImage = false
+                        
+                        // 将结果保存到历史记录
+                        self.saveToHistory(result: result, theme: "OCR")
+                    }
+                } else {
+                    throw TranslationError.translationFailed("无法获取Gemini翻译服务")
+                }
+            } catch {
+                // 处理错误
+                await MainActor.run {
+                    self.isLoading = false
+                    self.hasSelectedImage = false
+                    if let translationError = error as? TranslationError {
+                        self.errorMessage = translationError.localizedDescription
+                        self.translatedText = "OCR错误: \(translationError.localizedDescription)"
+                    } else {
+                        self.errorMessage = error.localizedDescription
+                        self.translatedText = "OCR错误: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
     }
 } 

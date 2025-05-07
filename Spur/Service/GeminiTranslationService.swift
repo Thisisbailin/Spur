@@ -6,29 +6,39 @@
 //
 
 import Foundation
+import SwiftUI
 
 // Gemini API翻译服务实现
 class GeminiTranslationService: TranslationServiceProtocol {
     var serviceName: String { "Gemini API" }
     
-    // Gemini API密钥（实际开发中应从安全的地方获取，如Keychain）
-    private var apiKey: String = "YOUR_GEMINI_API_KEY"
-    private let apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+    // API调用相关
+    private let workerEndpoint = "https://lexis.thisisbailin.workers.dev/define" // 通过Worker.js中转
+    private let session = URLSession.shared
     
     // 翻译主题
     private var currentTheme: String = "日常"
+    
+    // 选中的OCR图像
+    private var selectedImage: NSImage? = nil
     
     func translate(text: String, from: String, to: String) async throws -> String {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw TranslationError.invalidInput
         }
         
-        // 构建请求URL
-        let urlString = "\(apiEndpoint)?key=\(apiKey)"
-        guard let url = URL(string: urlString) else {
-            throw TranslationError.unknown
+        // 检查是否有选中的图像需要OCR识别
+        if let image = selectedImage {
+            // 使用OCR服务处理图像
+            return try await translateWithOCR(image: image, from: from, to: to)
+        } else {
+            // 正常文本翻译
+            return try await translateText(text: text, from: from, to: to)
         }
-        
+    }
+    
+    // 处理文本翻译
+    private func translateText(text: String, from: String, to: String) async throws -> String {
         // 检查是否包含主题指令，如果已经包含则直接使用原文本
         let containsThemeInstructions = text.contains("以学术和专业的语言风格") || 
                                         text.contains("解释词语来源并提供相关上下文") ||
@@ -41,8 +51,8 @@ class GeminiTranslationService: TranslationServiceProtocol {
             promptText = text
         } else {
             // 没有主题指令，根据源语言和目标语言构建提示词
-            let sourceLanguage = from == "auto" ? "自动检测" : from
-            let targetLanguage = to
+            let sourceLanguage = from == "auto" ? "自动检测" : LanguageData.language(for: from).name
+            let targetLanguage = LanguageData.language(for: to).name
             
             // 构建提示文本，加入当前主题指令
             let themeInstruction = getThemeInstruction(theme: currentTheme)
@@ -56,14 +66,18 @@ class GeminiTranslationService: TranslationServiceProtocol {
             """
         }
         
+        // 构建请求体 - 使用Worker格式
+        let userContentPart: [String: Any] = [
+            "parts": [
+                ["text": promptText]
+            ]
+        ]
+        
+        let systemInstructionText = "你是一位专业的翻译助手，负责准确、流畅地将文本从一种语言翻译到另一种语言。只返回翻译后的文本，不要添加任何额外的解释、评论或格式。"
+        
         let requestBody: [String: Any] = [
-            "contents": [
-                [
-                    "parts": [
-                        ["text": promptText]
-                    ]
-                ]
-            ],
+            "systemInstruction": systemInstructionText,
+            "userContent": [userContentPart],
             "generationConfig": [
                 "temperature": 0.2,
                 "topP": 0.8,
@@ -71,34 +85,72 @@ class GeminiTranslationService: TranslationServiceProtocol {
             ]
         ]
         
+        // 发送请求并处理响应
+        return try await sendRequestToWorker(requestBody: requestBody)
+    }
+    
+    // 处理图像OCR翻译
+    private func translateWithOCR(image: NSImage, from: String, to: String) async throws -> String {
+        // 准备图像数据
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let imageData = NSBitmapImageRep(cgImage: cgImage).representation(using: .jpeg, properties: [:]),
+              let base64Image = imageData.base64EncodedString().addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+            throw TranslationError.invalidInput
+        }
+        
+        // 构建带有图像的请求体
+        let userContentPart: [String: Any] = [
+            "parts": [
+                ["inlineData": ["mimeType": "image/jpeg", "data": base64Image]],
+                ["text": "识别这张图片中的文字，然后翻译成中文。请直接返回翻译结果，不要添加任何额外的解释。"]
+            ]
+        ]
+        
+        // 系统指令
+        let systemInstructionText = "你是一位专业的OCR识别和翻译助手，负责准确识别图像中的文字并翻译成目标语言。只返回翻译后的文本，保持原始文本的段落格式，不要添加任何额外的解释或评论。"
+        
+        // 构建请求
+        let requestBody: [String: Any] = [
+            "systemInstruction": systemInstructionText,
+            "userContent": [userContentPart]
+        ]
+        
+        // 清除已处理的图像
+        defer { self.selectedImage = nil }
+        
+        // 发送请求到OCR端点
+        return try await sendRequestToOCRWorker(requestBody: requestBody)
+    }
+    
+    // 发送请求到Worker（文本翻译）
+    private func sendRequestToWorker(requestBody: [String: Any]) async throws -> String {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody) else {
             throw TranslationError.unknown
         }
         
-        // 创建请求
+        guard let url = URL(string: workerEndpoint) else {
+            throw TranslationError.networkError
+        }
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = jsonData
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
         
         do {
-            // 发送请求
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             
-            // 验证响应
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw TranslationError.networkError
             }
             
-            // 检查HTTP状态码
             if httpResponse.statusCode != 200 {
-                // 尝试解析错误信息
                 if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let error = errorJson["error"] as? [String: Any],
-                   let message = error["message"] as? String {
-                    throw TranslationError.translationFailed(message)
+                   let error = errorJson["error"] as? String {
+                    throw TranslationError.translationFailed(error)
                 }
-                throw TranslationError.translationFailed("HTTP状态码: \(httpResponse.statusCode)")
+                throw TranslationError.translationFailed("HTTP错误: \(httpResponse.statusCode)")
             }
             
             // 解析响应
@@ -111,8 +163,7 @@ class GeminiTranslationService: TranslationServiceProtocol {
             }
             
             // 处理翻译结果，提取关键部分
-            let translatedText = extractTranslatedText(from: text)
-            return translatedText
+            return extractTranslatedText(from: text)
         } catch {
             if let translationError = error as? TranslationError {
                 throw translationError
@@ -120,6 +171,60 @@ class GeminiTranslationService: TranslationServiceProtocol {
                 throw TranslationError.networkError
             } else {
                 throw TranslationError.translationFailed(error.localizedDescription)
+            }
+        }
+    }
+    
+    // 发送请求到Worker（OCR识别）
+    private func sendRequestToOCRWorker(requestBody: [String: Any]) async throws -> String {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody) else {
+            throw TranslationError.unknown
+        }
+        
+        let ocrEndpoint = "https://lexis.thisisbailin.workers.dev/ocr" // OCR专用端点
+        
+        guard let url = URL(string: ocrEndpoint) else {
+            throw TranslationError.networkError
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = jsonData
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60 // OCR可能需要更长时间
+        
+        do {
+            let (data, response) = try await session.data(for: request)
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw TranslationError.networkError
+            }
+            
+            if httpResponse.statusCode != 200 {
+                if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let error = errorJson["error"] as? String {
+                    throw TranslationError.translationFailed(error)
+                }
+                throw TranslationError.translationFailed("OCR处理错误: \(httpResponse.statusCode)")
+            }
+            
+            // 解析OCR响应
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let candidates = json["candidates"] as? [[String: Any]],
+                  let content = candidates.first?["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]],
+                  let text = parts.first?["text"] as? String else {
+                throw TranslationError.translationFailed("解析OCR响应失败")
+            }
+            
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            if let translationError = error as? TranslationError {
+                throw translationError
+            } else if let urlError = error as? URLError {
+                throw TranslationError.networkError
+            } else {
+                throw TranslationError.translationFailed("OCR处理失败: \(error.localizedDescription)")
             }
         }
     }
@@ -153,13 +258,23 @@ class GeminiTranslationService: TranslationServiceProtocol {
         return true
     }
     
-    // 设置API密钥
-    func setApiKey(_ key: String) {
-        self.apiKey = key
-    }
-    
     // 设置翻译主题
     func setTheme(_ theme: String) {
         self.currentTheme = theme
+    }
+    
+    // 设置要OCR识别的图像
+    func setImage(_ image: NSImage?) {
+        self.selectedImage = image
+    }
+    
+    // 检查是否有图像等待处理
+    func hasImageForOCR() -> Bool {
+        return selectedImage != nil
+    }
+    
+    // 清除待处理的图像
+    func clearImageForOCR() {
+        selectedImage = nil
     }
 } 
