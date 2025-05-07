@@ -28,8 +28,9 @@ struct InputAreaView: View {
     @FocusState.Binding var isTextEditorFocused: Bool
     
     // OCR相关状态
-    @State private var isImagePickerPresented: Bool = false
+    @State private var dragOver = false
     @State private var selectedImage: NSImage? = nil
+    @State private var showImagePreview = false
     
     // Computed property to determine if Apple Translation is used
     var isUsingAppleTranslation: Bool {
@@ -82,30 +83,71 @@ struct InputAreaView: View {
             .padding(.top, 6)    // Reduced top padding
             .padding(.bottom, 3) // Reduced bottom padding
 
-            // Text Input Area
-            textInputEditor()
-                .padding(.top, 3) // Reduced top padding
-                .padding(.horizontal, 6) // Reduced horizontal padding
+            // Text Input Area or Image Preview
+            if showImagePreview, let previewImage = selectedImage {
+                imagePreviewView(image: previewImage)
+                    .padding(.top, 3)
+                    .padding(.horizontal, 6)
+            } else {
+                // Text Input Editor with Drop Area
+                textInputEditor()
+                    .padding(.top, 3) // Reduced top padding
+                    .padding(.horizontal, 6) // Reduced horizontal padding
+            }
 
             // Controls Area (Engine and Translate Button)
             controlsBar()
                 .padding(EdgeInsets(top: 5, leading: 8, bottom: 6, trailing: 8)) // Reduced padding
         }
         .background(Color.primary.opacity(0.04))
-        .sheet(isPresented: $isImagePickerPresented) {
-            // 处理图像选择
-            ImagePickerView { selectedImage in
-                if let image = selectedImage {
-                    // 执行OCR翻译
-                    self.selectedImage = image
-                    viewModel.performOCRTranslation(with: image)
-                }
-                isImagePickerPresented = false
-            }
-        }
     }
 
     // MARK: - Subviews
+
+    // 图像预览视图
+    @ViewBuilder
+    private func imagePreviewView(image: NSImage) -> some View {
+        VStack {
+            ZStack(alignment: .topTrailing) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 120)
+                    .cornerRadius(6)
+                    .clipped()
+                
+                Button(action: {
+                    withAnimation {
+                        selectedImage = nil
+                        showImagePreview = false
+                    }
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverEffect()
+                .padding(6)
+            }
+            
+            Button("翻译此图片") {
+                if let image = selectedImage {
+                    viewModel.performOCRTranslation(with: image)
+                    withAnimation {
+                        selectedImage = nil
+                        showImagePreview = false
+                    }
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .padding(.vertical, 4)
+        }
+        .frame(height: min(textEditorHeight, 150))
+    }
 
     // Generic Language Menu
     @ViewBuilder
@@ -191,6 +233,7 @@ struct InputAreaView: View {
     @ViewBuilder
     private func textInputEditor() -> some View {
         ZStack(alignment: .bottomTrailing) {
+            // 文本编辑器
             TextEditor(text: $inputText)
                 .focused($isTextEditorFocused) // Use the binding
                 .font(.system(size: 14)) // Slightly smaller font
@@ -198,7 +241,12 @@ struct InputAreaView: View {
                 .padding(.horizontal, 3) // Reduced padding
                 .padding(.vertical, 4)   // Reduced padding
                 .scrollContentBackground(.hidden)
-                .background(Color.clear)
+                .background(dragOver ? Color.accentColor.opacity(0.1) : Color.clear)
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(dragOver ? Color.accentColor : Color.clear, lineWidth: 1)
+                )
                 .onChange(of: inputText) { oldValue, newValue in // Using new onChange syntax
                     // Enter key detection logic
                     if newValue.hasSuffix("\n") && newValue.count > previousInputText.count {
@@ -226,11 +274,40 @@ struct InputAreaView: View {
                     // This can be used if you want specific action on Enter without Shift
                     // For now, the onChange handles translation on newline.
                 }
+                // 拖放功能
+                .onDrop(of: ["public.file-url"], isTargeted: $dragOver) { providers in
+                    // 只有在使用Gemini API时允许拖放图像
+                    if isUsingAppleTranslation {
+                        return false
+                    }
+                    
+                    guard let provider = providers.first else {
+                        return false
+                    }
+                    
+                    provider.loadDataRepresentation(forTypeIdentifier: "public.file-url") { data, error in
+                        if let data = data, 
+                           let path = NSString(data: data, encoding: 4),
+                           let url = URL(string: path as String), 
+                           url.isFileURL {
+                            let image = NSImage(contentsOf: url)
+                            DispatchQueue.main.async {
+                                // 直接在输入区域显示图像
+                                withAnimation {
+                                    selectedImage = image
+                                    showImagePreview = true
+                                }
+                            }
+                        }
+                    }
+                    
+                    return true
+                }
             
             // OCR图像选择按钮
             if !isUsingAppleTranslation {
                 Button(action: {
-                    isImagePickerPresented = true
+                    openImagePicker()
                 }) {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 20))
@@ -254,6 +331,11 @@ struct InputAreaView: View {
                 ForEach(engines) { engine in
                     Button(engine.name) {
                         selectedTranslationEngine = engine.id
+                        if showImagePreview && isUsingAppleTranslation {
+                            // 如果切换到Apple翻译并且正在预览图片，则清除图片
+                            selectedImage = nil
+                            showImagePreview = false
+                        }
                     }
                 }
             } label: {
@@ -282,117 +364,49 @@ struct InputAreaView: View {
             }
 
             // Translate Button
-            Button(action: performTranslationAction) {
+            Button(action: {
+                if showImagePreview, let image = selectedImage {
+                    // 如果是图片预览状态，直接进行OCR翻译
+                    viewModel.performOCRTranslation(with: image)
+                    withAnimation {
+                        selectedImage = nil
+                        showImagePreview = false
+                    }
+                } else {
+                    // 否则进行普通文本翻译
+                    performTranslationAction()
+                }
+            }) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 20)) // Slightly smaller icon
             }
             .buttonStyle(.plain)
-            .foregroundColor(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .gray.opacity(0.5) : Color.accentColor)
-            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .foregroundColor((inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !showImagePreview) ? .gray.opacity(0.5) : Color.accentColor)
+            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !showImagePreview)
             .padding(.horizontal, 5) // Reduced padding
             .buttonHoverEffect() // 添加悬停效果
             .help("翻译")
         }
     }
-}
-
-// MARK: - 图像选择器视图
-struct ImagePickerView: View {
-    var onSelect: (NSImage?) -> Void
     
-    @State private var isHovering = false
-    @State private var isDragging = false
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("选择图像进行OCR识别")
-                .font(.headline)
-            
-            ZStack {
-                Rectangle()
-                    .fill(isDragging ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.05))
-                    .frame(width: 300, height: 200)
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(isDragging ? Color.accentColor : Color.primary.opacity(0.2), lineWidth: 2)
-                    )
-                
-                VStack(spacing: 12) {
-                    Image(systemName: "doc.text.image")
-                        .font(.system(size: 40))
-                        .foregroundColor(isDragging ? .accentColor : .primary.opacity(0.7))
-                    
-                    Text("拖放图像到此处")
-                        .font(.body)
-                    
-                    Text("或")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Button("选择图像文件") {
-                        openFileDialog()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
-            }
-            .onDrop(of: ["public.file-url"], isTargeted: $isDragging) { providers in
-                guard let provider = providers.first else {
-                    return false
-                }
-                
-                provider.loadDataRepresentation(forTypeIdentifier: "public.file-url") { data, error in
-                    if let data = data, 
-                       let path = NSString(data: data, encoding: 4),
-                       let url = URL(string: path as String), 
-                       url.isFileURL {
-                        let image = NSImage(contentsOf: url)
-                        DispatchQueue.main.async {
-                            onSelect(image)
-                        }
-                    }
-                }
-                
-                return true
-            }
-            
-            HStack {
-                Button("取消") {
-                    onSelect(nil)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                
-                Spacer().frame(width: 20)
-                
-                Button("确认") {
-                    // 直接关闭视图，图像已通过文件选择器处理
-                    onSelect(nil)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(true) // 不需要确认按钮的功能，由文件选择器直接处理
-            }
-            .padding(.top, 10)
-        }
-        .padding(20)
-        .frame(width: 350, height: 350)
-    }
-    
-    // 打开文件选择器
-    private func openFileDialog() {
+    // 打开图像选择器
+    private func openImagePicker() {
         let openPanel = NSOpenPanel()
         openPanel.allowsMultipleSelection = false
         openPanel.canChooseDirectories = false
         openPanel.canChooseFiles = true
         openPanel.allowedContentTypes = [.image]
+        openPanel.title = "选择图像进行OCR识别"
+        openPanel.message = "选择需要进行文字识别翻译的图像"
         
         openPanel.begin { response in
             if response == .OK, let url = openPanel.url {
                 let image = NSImage(contentsOf: url)
                 DispatchQueue.main.async {
-                    onSelect(image)
+                    withAnimation {
+                        selectedImage = image
+                        showImagePreview = true
+                    }
                 }
             }
         }

@@ -8,12 +8,33 @@
 import Foundation
 import SwiftUI
 
-// Gemini API翻译服务实现
+// MARK: - OCR提示词管理
+
+// GeminiOCR提示词
+struct GeminiOCRPrompts {
+    // --- 系统指令：定义核心任务和输出格式 ---
+    static let ocrSystemInstruction = """
+You are a highly specialized image OCR and text translation agent. Your task is to:
+1. Accurately extract all text from the provided image
+2. Preserve the original formatting including paragraphs and line breaks
+3. Translate the extracted text into Chinese
+4. Return only the translated text without any explanations or metadata
+
+Focus on accuracy and fluency of the translation. If the image contains text in multiple languages, translate all of it to Chinese.
+"""
+
+    // --- 用户指令：简单指令引用系统指令和图像 ---
+    static let ocrUserInstruction = "识别这张图片中的所有文本并翻译成中文。请直接返回翻译结果，不要添加任何解释或元数据。"
+}
+
+// MARK: - Gemini API翻译服务实现
+
 class GeminiTranslationService: TranslationServiceProtocol {
     var serviceName: String { "Gemini API" }
     
     // API调用相关
-    private let workerEndpoint = "https://lexis.thisisbailin.workers.dev/define" // 通过Worker.js中转
+    private let workerEndpoint = "https://lexis.thisisbailin.workers.dev/define" // 文本翻译
+    private let ocrEndpoint = "https://lexis.thisisbailin.workers.dev/ocr" // OCR专用端点
     private let session = URLSession.shared
     
     // 翻译主题
@@ -91,35 +112,95 @@ class GeminiTranslationService: TranslationServiceProtocol {
     
     // 处理图像OCR翻译
     private func translateWithOCR(image: NSImage, from: String, to: String) async throws -> String {
+        print("GeminiTranslationService: 开始OCR图像识别...")
+        
         // 准备图像数据
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let imageData = NSBitmapImageRep(cgImage: cgImage).representation(using: .jpeg, properties: [:]),
-              let base64Image = imageData.base64EncodedString().addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+              let imageRep = NSBitmapImageRep(cgImage: cgImage),
+              let jpegData = imageRep.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) else {
             throw TranslationError.invalidInput
         }
         
-        // 构建带有图像的请求体
+        let base64Image = jpegData.base64EncodedString()
+        
+        // 获取指令
+        let systemInstruction = GeminiOCRPrompts.ocrSystemInstruction
+        let userInstruction = GeminiOCRPrompts.ocrUserInstruction
+        
+        // 构建请求体
         let userContentPart: [String: Any] = [
             "parts": [
                 ["inlineData": ["mimeType": "image/jpeg", "data": base64Image]],
-                ["text": "识别这张图片中的文字，然后翻译成中文。请直接返回翻译结果，不要添加任何额外的解释。"]
+                ["text": userInstruction]
             ]
         ]
         
-        // 系统指令
-        let systemInstructionText = "你是一位专业的OCR识别和翻译助手，负责准确识别图像中的文字并翻译成目标语言。只返回翻译后的文本，保持原始文本的段落格式，不要添加任何额外的解释或评论。"
-        
-        // 构建请求
-        let requestBody: [String: Any] = [
-            "systemInstruction": systemInstructionText,
-            "userContent": [userContentPart]
+        let payloadForWorker: [String: Any] = [
+            "systemInstruction": systemInstruction,
+            "userContent": [userContentPart],
+            "generationConfig": [
+                "temperature": 0.2,
+                "topP": 0.8,
+                "topK": 40
+            ]
         ]
+        
+        // 序列化请求体
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payloadForWorker) else {
+            throw TranslationError.unknown
+        }
+        
+        // 创建请求
+        guard let url = URL(string: ocrEndpoint) else {
+            throw TranslationError.networkError
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = jsonData
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60 // OCR可能需要更长时间
+        
+        print("GeminiTranslationService: 发送OCR请求到Worker...")
         
         // 清除已处理的图像
         defer { self.selectedImage = nil }
         
-        // 发送请求到OCR端点
-        return try await sendRequestToOCRWorker(requestBody: requestBody)
+        do {
+            let (data, response) = try await session.data(for: request)
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw TranslationError.networkError
+            }
+            
+            if httpResponse.statusCode != 200 {
+                // 尝试解析错误信息
+                let errorBody = String(data: data, encoding: .utf8) ?? "未知错误"
+                print("❌ OCR错误: HTTP \(httpResponse.statusCode). Body: \(errorBody)")
+                throw TranslationError.translationFailed("OCR处理错误: \(httpResponse.statusCode)")
+            }
+            
+            // 解析OCR响应
+            guard let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let candidates = result["candidates"] as? [[String: Any]],
+                  let content = candidates.first?["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]],
+                  let text = parts.first?["text"] as? String else {
+                let rawString = String(data: data, encoding: .utf8) ?? "(无法解码)"
+                print("❌ 解析OCR响应失败. Raw: \(rawString)")
+                throw TranslationError.translationFailed("解析OCR响应失败")
+            }
+            
+            print("✅ OCR识别成功!")
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            if let translationError = error as? TranslationError {
+                throw translationError
+            } else {
+                print("❌ OCR处理失败: \(error.localizedDescription)")
+                throw TranslationError.translationFailed("OCR处理失败: \(error.localizedDescription)")
+            }
+        }
     }
     
     // 发送请求到Worker（文本翻译）
@@ -171,60 +252,6 @@ class GeminiTranslationService: TranslationServiceProtocol {
                 throw TranslationError.networkError
             } else {
                 throw TranslationError.translationFailed(error.localizedDescription)
-            }
-        }
-    }
-    
-    // 发送请求到Worker（OCR识别）
-    private func sendRequestToOCRWorker(requestBody: [String: Any]) async throws -> String {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody) else {
-            throw TranslationError.unknown
-        }
-        
-        let ocrEndpoint = "https://lexis.thisisbailin.workers.dev/ocr" // OCR专用端点
-        
-        guard let url = URL(string: ocrEndpoint) else {
-            throw TranslationError.networkError
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = jsonData
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 60 // OCR可能需要更长时间
-        
-        do {
-            let (data, response) = try await session.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw TranslationError.networkError
-            }
-            
-            if httpResponse.statusCode != 200 {
-                if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let error = errorJson["error"] as? String {
-                    throw TranslationError.translationFailed(error)
-                }
-                throw TranslationError.translationFailed("OCR处理错误: \(httpResponse.statusCode)")
-            }
-            
-            // 解析OCR响应
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let candidates = json["candidates"] as? [[String: Any]],
-                  let content = candidates.first?["content"] as? [String: Any],
-                  let parts = content["parts"] as? [[String: Any]],
-                  let text = parts.first?["text"] as? String else {
-                throw TranslationError.translationFailed("解析OCR响应失败")
-            }
-            
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            if let translationError = error as? TranslationError {
-                throw translationError
-            } else if let urlError = error as? URLError {
-                throw TranslationError.networkError
-            } else {
-                throw TranslationError.translationFailed("OCR处理失败: \(error.localizedDescription)")
             }
         }
     }
